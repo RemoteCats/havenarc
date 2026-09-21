@@ -3,6 +3,16 @@
 -- Optional: only needed to receive mail through the Resend inbound webhook.
 -- Everything here is written by the server route holding the service role, so
 -- there is no insert policy at all.
+--
+-- Wrapped in a transaction on purpose. Every policy below is written as
+-- `drop policy if exists` followed by `create policy`, which is the only way to
+-- make a policy definition re-runnable, and it leaves a window: a run that stops
+-- between the two, because the editor timed out or a later statement failed,
+-- destroys a working policy and does not put it back. Re-running a migration to
+-- repair the schema could then be what breaks it. Inside a transaction the run
+-- either fully applies or changes nothing at all.
+
+begin;
 
 create extension if not exists pgcrypto;
 
@@ -138,3 +148,5 @@ begin
     end if;
   end loop;
 end $$;
+
+commit;

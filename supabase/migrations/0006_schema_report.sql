@@ -9,6 +9,16 @@
 -- SECURITY DEFINER because it reads the catalogs, and granted to service_role
 -- only: it describes the shape of the schema, which is not something to hand
 -- to the browser. Guarded and re-runnable like the rest.
+--
+-- Wrapped in a transaction on purpose. Every policy below is written as
+-- `drop policy if exists` followed by `create policy`, which is the only way to
+-- make a policy definition re-runnable, and it leaves a window: a run that stops
+-- between the two, because the editor timed out or a later statement failed,
+-- destroys a working policy and does not put it back. Re-running a migration to
+-- repair the schema could then be what breaks it. Inside a transaction the run
+-- either fully applies or changes nothing at all.
+
+begin;
 
 create or replace function public.schema_report()
 returns text[]
@@ -181,3 +191,5 @@ $fn$;
 
 revoke all on function public.schema_report() from public, anon, authenticated;
 grant execute on function public.schema_report() to service_role;
+
+commit;

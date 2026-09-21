@@ -4,6 +4,16 @@
 --
 -- Unlike every other table here, this one IS publicly readable: it holds the
 -- address block printed in the footer. Only admins may write it.
+--
+-- Wrapped in a transaction on purpose. Every policy below is written as
+-- `drop policy if exists` followed by `create policy`, which is the only way to
+-- make a policy definition re-runnable, and it leaves a window: a run that stops
+-- between the two, because the editor timed out or a later statement failed,
+-- destroys a working policy and does not put it back. Re-running a migration to
+-- repair the schema could then be what breaks it. Inside a transaction the run
+-- either fully applies or changes nothing at all.
+
+begin;
 
 create extension if not exists pgcrypto;
 
@@ -54,3 +64,5 @@ begin
     alter publication supabase_realtime add table public.site_settings;
   end if;
 end $$;
+
+commit;

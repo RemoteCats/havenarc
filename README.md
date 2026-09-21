@@ -54,8 +54,18 @@ In the Supabase SQL editor, run in order:
 | `supabase/migrations/0005_offices.sql`       | the studio offices, one address and phone each              |
 | `supabase/migrations/0006_schema_report.sql` | lets `/api/health` and `verify.sql` name anything missing   |
 
-All six are guarded and re-runnable: applying them twice is a no-op, not an
-error, and an edit made from the dashboard survives a re-run.
+All six are guarded, atomic and re-runnable: applying them twice is a no-op,
+not an error, and an edit made from the dashboard survives a re-run.
+
+The transaction around each one matters more than it looks. A policy is made
+re-runnable by `drop policy if exists` followed by `create policy`, and that
+leaves a window: a run that stops between the two, because the editor timed out
+or a later statement failed, destroys a working policy and does not put it back.
+Re-running a migration to repair the schema could then be the thing that breaks
+it, and the symptom is the chat refusing every message with
+`new row violates row-level security policy`. Inside a transaction the run
+either fully applies or changes nothing, so a failed run is safe to just run
+again once the cause is fixed.
 
 Then check your work with `supabase/verify.sql`, which asserts every table,
 column, policy, trigger and publication membership exists and raises one
