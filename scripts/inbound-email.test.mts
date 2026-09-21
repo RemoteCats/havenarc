@@ -155,6 +155,27 @@ console.log("\n3. Deliveries that are dropped, and why\n");
     ok(`${name} is acknowledged and ignored`, res.status === 200 && out.ignored === true, JSON.stringify(out));
   }
 
+  // The worst case: real mail arriving under an event name this route does not
+  // file. It answers 200, so Resend's log shows success and nothing is saved.
+  calls = [];
+  const wrongType = JSON.stringify({
+    type: "email.inbound",
+    data: {
+      from: "Someone Outside <someone@example.com>",
+      to: ["frontdesk@meastroarchitecture.com"],
+      subject: "HI",
+      text: "a real message",
+      headers: [{ name: "Message-Id", value: "<x@y>" }],
+    },
+  });
+  const res = await post(mod, wrongType);
+  const out = await res.json();
+  ok("real mail under an unexpected event type is not filed", !calls.some((c) => c.method === "POST"));
+  ok("but it is called out rather than dropped silently",
+     Boolean(out.warning) && /email.inbound/.test(out.warning), JSON.stringify(out));
+  ok("and the event name is reported", out.type === "email.inbound", JSON.stringify(out.type));
+  console.log(`          Resend's log would show: ${JSON.stringify(out.warning)}`);
+
   const badFrom = await post(mod, delivery({ from: "" }));
   ok("a delivery with no usable sender is refused with a reason",
      badFrom.status === 400 && /sender/i.test((await badFrom.json()).error), String(badFrom.status));

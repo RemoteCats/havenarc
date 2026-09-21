@@ -4,6 +4,7 @@ import { useState, type FormEvent } from "react";
 import { useRealtimeRows } from "@/hooks/useRealtimeRows";
 import { sendEmailReply } from "@/lib/api/email";
 import { ITEM_STATUSES, type EmailMessage, type EmailThread } from "@/lib/database.types";
+import { htmlToText } from "@/lib/html-to-text";
 import { readableError } from "@/lib/readable-error";
 
 import {
@@ -14,6 +15,23 @@ import {
   StatusSelect,
   formatWhen,
 } from "./primitives";
+
+/**
+ * What to print for a message body.
+ *
+ * Plenty of mail is HTML-only, and a message stored with `body_html` and no
+ * `body_text` used to render as "(no plain-text body)" while holding the entire
+ * message. Falling back to a text rendering of the HTML shows the words. The
+ * result is inserted as text, never as HTML, so nothing from an email is ever
+ * parsed as markup in the dashboard.
+ */
+function readableBody(message: EmailMessage): string {
+  const plain = message.body_text?.trim();
+  if (plain) return plain;
+  const fromHtml = htmlToText(message.body_html).trim();
+  if (fromHtml) return fromHtml;
+  return "(this message arrived with no body)";
+}
 
 export function EmailTab({ enabled }: { enabled: boolean }) {
   const { rows, loading, error } = useRealtimeRows<EmailThread>("email_threads", {
@@ -138,7 +156,7 @@ function Thread({ thread, enabled }: { thread: EmailThread; enabled: boolean }) 
                 <span>{formatWhen(message.created_at)}</span>
               </header>
               <p className="mt-2 whitespace-pre-wrap break-words text-sm">
-                {message.body_text || "(no plain-text body)"}
+                {readableBody(message)}
               </p>
               {message.has_attachments ? (
                 <p className="mt-2 text-xs text-muted-foreground">Has attachments.</p>

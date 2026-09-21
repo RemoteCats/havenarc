@@ -260,9 +260,31 @@ two separate settings there, and the first can work while the second is missing.
 A `200` that does *not* show up is the admin SELECT policy above. A `401` or
 `500` names itself in the response.
 
+There is one more way to get zeros with everything else green: Resend calling
+the endpoint with an event this route does not file. The route saves
+`email.received` and acknowledges everything else with a `200`, because delivery
+receipts and bounces share the endpoint and must not be retried. So an inbound
+event under a different name would show up in Resend's log as delivery after
+delivery succeeding while nothing is ever saved. The route now recognises a
+payload that carries a sender and a message body, and says so in the response
+rather than dropping it quietly, so **read the response body of a successful
+delivery in Resend's log** before concluding it worked. It will say
+`{"ignored":true,...}` with a warning naming the event if that is what is
+happening.
+
 The handler itself is covered by `scripts/inbound-email.test.mts`, which drives
 a correctly signed delivery through it with a stand-in for Supabase, so a
 delivery that is arriving and signed correctly will be filed.
+
+### A message that arrives with no body
+
+Plenty of mail is HTML-only, so a message can file correctly and still read as
+empty. `pickBody()` looks for the text under any of the names a provider might
+use, nested or not, and falls back to a plain-text rendering of the HTML; the
+dashboard does the same for rows already stored. If a delivery genuinely has no
+body anywhere, the route logs the keys that *were* present, which is the only
+way to find out where a provider actually put it. `scripts/email-body.test.mts`
+covers both halves.
 
 ## Local development
 

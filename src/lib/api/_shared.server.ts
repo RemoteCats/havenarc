@@ -4,7 +4,11 @@
 // server route handlers, never at the top level of a module the client loads.
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+
+import { htmlToText } from "../html-to-text.ts";
 import { createHmac, timingSafeEqual } from "node:crypto";
+
+export { htmlToText };
 
 // ---------------------------------------------------------------------------
 // Environment
@@ -411,6 +415,38 @@ export function parseAddress(value: unknown): { name: string | null; email: stri
 }
 
 /** Strips any run of `Re:` / `Fwd:` / `Fw:` prefixes so replies thread. */
+/**
+ * The message body, wherever the provider put it.
+ *
+ * Resend's inbound payload is the only thing that decides these key names, and
+ * getting it wrong is invisible: the mail files successfully with an empty
+ * body. So look in the places it could reasonably be, and fall back to the
+ * HTML, which is what most mail actually carries.
+ */
+export function pickBody(data: Record<string, unknown>): { text: string; html: string } {
+  const nested = (data["content"] ?? data["body"]) as Record<string, unknown> | undefined;
+  const from = (keys: string[]): string => {
+    for (const key of keys) {
+      const direct = data[key];
+      if (typeof direct === "string" && direct.trim() !== "") return direct;
+      if (nested && typeof nested === "object") {
+        const inner = (nested as Record<string, unknown>)[key];
+        if (typeof inner === "string" && inner.trim() !== "") return inner;
+      }
+    }
+    return "";
+  };
+
+  const html = from(["html", "body_html", "html_body", "htmlBody"]);
+  const plain = from(["text", "plain", "body_text", "text_body", "textBody", "plain_body"]);
+  const bodyString = typeof data["body"] === "string" ? data["body"] : "";
+
+  return {
+    text: plain || htmlToText(html) || bodyString,
+    html,
+  };
+}
+
 export function normaliseSubject(value: unknown): string {
   let subject = text(value, 500);
   let previous: string;

@@ -10,6 +10,7 @@ import {
   json,
   normaliseSubject,
   parseAddress,
+  pickBody,
   text,
   verifyResendWebhook,
 } from "./_shared.server";
@@ -80,8 +81,34 @@ export async function handleInboundEmail(request: Request): Promise<Response> {
   }
 
   if (payload.type !== "email.received") {
+    const type = String(payload.type ?? "");
+    const body = payload.data ?? {};
+
+    // A payload carrying a sender and a message body is inbound mail, whatever
+    // the event is called. Dropping that silently is the worst failure this
+    // route has: it answers 200, so Resend's log shows delivery after delivery
+    // succeeding while nothing is ever filed, and every other check stays
+    // green. Do not guess and file it, because an outbound receipt carries a
+    // sender too and would land in the dashboard as a customer email. Say it
+    // loudly enough that the delivery log explains itself instead.
+    const looksInbound =
+      isEmail(parseAddress(body.from).email) &&
+      (typeof body.text === "string" || typeof body.html === "string");
+
+    if (looksInbound) {
+      console.warn(
+        `[inbound-email] dropped what looks like real mail: this route files "email.received" and the event was "${type}".`,
+      );
+      return json({
+        ignored: true,
+        type,
+        warning: `This looks like inbound mail but arrived as "${type}", and this route only files "email.received". Nothing was saved. If this is the event your inbound webhook sends, the route needs to accept it.`,
+      });
+    }
+
     // Delivery/bounce/open events share the endpoint. Acknowledge and drop.
-    return json({ ignored: true, type: String(payload.type ?? "") });
+    console.info(`[inbound-email] ignored event: ${type}`);
+    return json({ ignored: true, type });
   }
 
   const mail = payload.data ?? {};
@@ -98,6 +125,17 @@ export async function handleInboundEmail(request: Request): Promise<Response> {
   const messageId =
     headerValue(headers, "message-id") ?? (providerId ? `resend:${providerId}` : null);
   const inReplyTo = headerValue(headers, "in-reply-to");
+  const body = pickBody(mail as Record<string, unknown>);
+  if (!body.text && !body.html) {
+    // Filing a message with no body is worse than useless: the dashboard shows
+    // an empty conversation and there is nothing to say where the words went.
+    // The key names are the provider's to choose, so print the ones that
+    // arrived rather than guessing again.
+    console.warn(
+      `[inbound-email] no body on this delivery. The keys present were: ${Object.keys(mail).join(", ") || "(none)"}. If one of those holds the message, pickBody() in _shared.server.ts needs it.`,
+    );
+  }
+
   const rawSubject = text(mail.subject, 500);
   const subject = normaliseSubject(rawSubject);
   const attachments = mail.attachments;
@@ -164,8 +202,8 @@ export async function handleInboundEmail(request: Request): Promise<Response> {
       from_name: from.name,
       to_email: firstRecipient(mail.to) || null,
       subject: rawSubject || subject,
-      body_text: text(mail.text, 100000) || null,
-      body_html: typeof mail.html === "string" ? mail.html.slice(0, 200000) : null,
+      body_text: text(body.text, 100000) || null,
+      body_html: body.html ? body.html.slice(0, 200000) : null,
       message_id: messageId,
       in_reply_to: inReplyTo,
       has_attachments: Array.isArray(attachments) && attachments.length > 0,
