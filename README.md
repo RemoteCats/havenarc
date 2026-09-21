@@ -189,6 +189,8 @@ The code underneath is covered offline, with no key and no network:
 
 ```bash
 node --experimental-strip-types --no-warnings scripts/resend.test.mts
+node --experimental-strip-types --no-warnings scripts/inbound-email.test.mts
+node --experimental-strip-types --no-warnings scripts/chat-errors.test.mts
 ```
 
 Forty assertions over the real `sendEmail` and `verifyResendWebhook`: the
@@ -200,6 +202,57 @@ by a local stand-in.
 
 > **Do not point a forwarding address on `MAIL_DOMAIN` back at your own inbound
 > route.** Mail loops through the webhook until the sending quota is gone.
+
+### When mail does not reach the dashboard
+
+Mail that never appears has four possible stopping points, and the dashboard
+cannot tell them apart. Work down the list; `/api/health` answers the last two.
+
+1. **Resend never received it.** Receiving mail needs the domain's **MX records**
+   pointing at Resend, which is separate from the TXT records that let you
+   *send*. A domain verified for sending still delivers its incoming mail
+   wherever its MX says, and that delivery succeeds, which is why nothing
+   bounces. If Resend's webhook log shows no attempt at all for the time you
+   sent, this is it.
+2. **No inbound route, or the wrong URL.** The route must point at
+   `https://<your-deployment>/api/inbound-email`.
+3. **The signature is being rejected.** Resend's log shows `401`, and the
+   response body names the cause: most often `RESEND_WEBHOOK_SECRET` holding an
+   API key rather than the `whsec_` signing secret from the inbound endpoint.
+4. **The write failed.** Resend's log shows `500` and the body names the
+   relation, usually because `0002_email.sql` has not been applied.
+
+There is a fifth, which looks exactly like the others from the dashboard: the
+message **was** filed, but staff cannot read it. The webhook writes with the
+service role, which bypasses RLS, so a missing `email_threads_admin_select` or
+`email_messages_admin_select` policy leaves rows in the table that the dashboard
+cannot see. `/api/health` counts with the service role too, so a non-zero count
+beside an empty dashboard is this and nothing else; the `schema` section names
+the policy, and re-running `0002_email.sql` restores it.
+
+`/api/health` reports the rest under `email`: whether the tables exist, how many
+messages have ever been filed, and when the last one arrived. A count of zero
+with the tables present means nothing has ever reached the endpoint, which
+narrows it to 1, 2 or 3.
+
+To settle it in one call, post a correctly signed delivery straight at the
+endpoint, bypassing Resend:
+
+```bash
+vercel env pull .env.local
+node --env-file=.env.local scripts/test-inbound.mjs https://your-deployment.example.com
+```
+
+A `200` that then shows up in **/admin → Email** means the endpoint, the secret,
+the database and the dashboard are all fine, and the only thing left is that
+Resend is not calling the URL. Receiving mail and forwarding it to a webhook are
+two separate settings there, and the first can work while the second is missing.
+A `200` that does *not* show up is the admin SELECT policy above. A `401` or
+`500` names itself in the response.
+
+The handler itself is covered by `scripts/inbound-email.test.mts`, which drives
+a correctly signed delivery through it with a stand-in for Supabase, so a
+delivery that is arriving and signed correctly will be filed.
 
 ## Local development
 

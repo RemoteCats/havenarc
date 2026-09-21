@@ -2,7 +2,9 @@
 // Server-only: it reads the signing secret and writes with the service role.
 
 import {
+  RESEND_WEBHOOK_SECRET,
   adminClient,
+  describeWebhookSecret,
   errorMessage,
   isEmail,
   json,
@@ -54,8 +56,20 @@ export async function handleInboundEmail(request: Request): Promise<Response> {
   const rawBody = await request.text();
   const verification = verifyResendWebhook(rawBody, request.headers);
   if (!verification.ok) {
-    console.warn("[inbound-email] rejected delivery:", verification.reason);
-    return json({ error: "Invalid signature.", reason: verification.reason }, 401);
+    // Resend shows the response body in its webhook log, which is where
+    // someone looks when mail is not arriving. Spend it on the likely cause
+    // rather than on "invalid signature", which they can already see.
+    const secret = describeWebhookSecret(RESEND_WEBHOOK_SECRET);
+    console.warn("[inbound-email] rejected delivery:", verification.reason, "|", secret);
+    return json(
+      {
+        error: "Invalid signature.",
+        reason: verification.reason,
+        secret,
+        fix: "RESEND_WEBHOOK_SECRET on this deployment must be the whsec_ signing secret shown on this inbound endpoint in Resend, not an API key. Change it in Vercel → Settings → Environment Variables and redeploy.",
+      },
+      401,
+    );
   }
 
   let payload: InboundPayload;
