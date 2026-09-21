@@ -8,7 +8,6 @@ import {
   json,
   normaliseSubject,
   parseAddress,
-  RESEND_API_KEY,
   text,
   verifyResendWebhook,
 } from "./_shared.server";
@@ -71,37 +70,8 @@ export async function handleInboundEmail(request: Request): Promise<Response> {
     return json({ ignored: true, type: String(payload.type ?? "") });
   }
 
-  const eventMail = payload.data ?? {};
-  const providerId = text(eventMail.email_id ?? eventMail.id, 200);
-  if (!providerId) {
-    return json({ error: "The received-email event did not include an email_id." }, 400);
-  }
-
-  // Resend's email.received webhook intentionally contains metadata only. Fetch
-  // the received message before filing it, otherwise body, headers, and sometimes
-  // the normalized sender are missing from the webhook payload.
-  let mail: InboundPayload["data"] = eventMail;
-  if (RESEND_API_KEY) {
-    const receivedResponse = await fetch(
-      `https://api.resend.com/emails/receiving/${encodeURIComponent(providerId)}`,
-      {
-        headers: { Authorization: `Bearer ${RESEND_API_KEY}` },
-      },
-    );
-    const receivedBody = (await receivedResponse.json().catch(() => null)) as
-      | (InboundPayload["data"] & { message?: string })
-      | null;
-    if (!receivedResponse.ok || !receivedBody) {
-      console.error("[inbound-email] could not retrieve received email:", {
-        status: receivedResponse.status,
-        message: receivedBody?.message,
-        providerId,
-      });
-      return json({ error: "Could not retrieve the received email from Resend." }, 502);
-    }
-    mail = { ...eventMail, ...receivedBody };
-  }
-
+  const mail = payload.data ?? {};
+  const providerId = text(mail.email_id ?? mail.id, 200);
   const from = parseAddress(mail.from);
 
   if (!isEmail(from.email)) {
