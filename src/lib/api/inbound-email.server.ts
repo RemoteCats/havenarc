@@ -13,6 +13,7 @@ import {
   normaliseSubject,
   bareAddress,
   describePayloadShape,
+  fetchInboundBody,
   parseAddress,
   pickBody,
   text,
@@ -21,6 +22,11 @@ import {
 
 type Header = { name?: unknown; value?: unknown };
 
+// Every field is optional and unknown on purpose: this is someone else's JSON,
+// and the one thing the last few rounds established is that its shape is not
+// what the field names suggest. The observed inbound payload carries the
+// envelope only, with `message_id` at the top level and no `headers` array,
+// and no body anywhere.
 type InboundPayload = {
   type?: unknown;
   data?: {
@@ -33,6 +39,8 @@ type InboundPayload = {
     html?: unknown;
     headers?: unknown;
     attachments?: unknown;
+    message_id?: unknown;
+    in_reply_to?: unknown;
   };
 };
 
@@ -135,9 +143,15 @@ export async function handleInboundEmail(request: Request): Promise<Response> {
   const headers = mail.headers;
   // Prefer the real RFC Message-Id; fall back to Resend's own id so dedupe and
   // threading still have a key.
+  // The real Message-Id arrives as a top-level field on the inbound payload,
+  // and there is no `headers` array on it at all. Read both: the header form is
+  // what a reply carries, and either is better than Resend's own id, which
+  // changes between retries and would double-file the same mail.
   const messageId =
-    headerValue(headers, "message-id") ?? (providerId ? `resend:${providerId}` : null);
-  const inReplyTo = headerValue(headers, "in-reply-to");
+    text(mail.message_id, 500) ||
+    headerValue(headers, "message-id") ||
+    (providerId ? `resend:${providerId}` : null);
+  const inReplyTo = text(mail.in_reply_to, 500) || headerValue(headers, "in-reply-to") || null;
   // Our own notification mail, arriving back through the inbound route. That
   // happens when the notify address is on the sending domain and forwards here,
   // and filing it turns the inbox into an echo of itself.
@@ -152,14 +166,34 @@ export async function handleInboundEmail(request: Request): Promise<Response> {
     });
   }
 
-  const body = pickBody(mail as Record<string, unknown>);
+  let body = pickBody(mail as Record<string, unknown>);
+  let fetchNotes: string[] = [];
+
+  // Resend's inbound webhook delivers the envelope only, so the words have to be
+  // fetched by id. Only reach for the network when the payload really has
+  // nothing, so a provider that does send the body costs no extra request.
+  if (!body.text && !body.html && providerId) {
+    const fetched = await fetchInboundBody(providerId);
+    fetchNotes = fetched.attempts;
+    if (fetched.text || fetched.html) {
+      body = { text: fetched.text, html: fetched.html };
+      console.info(`[inbound-email] body fetched by id: ${fetchNotes.join(" | ")}`);
+    } else {
+      console.warn(`[inbound-email] could not fetch the body: ${fetchNotes.join(" | ")}`);
+    }
+  }
   // Filing a message with no body is worse than useless: the dashboard shows an
   // empty conversation and there is nothing to say where the words went. The
   // key names are the provider's to choose, so rather than guess a third time,
   // put the shape of what arrived where the message would have been. Whoever
   // sees the blank message can then read why without server log access.
   const bodyShape =
-    body.text || body.html ? "" : describePayloadShape(mail as Record<string, unknown>);
+    body.text || body.html
+      ? ""
+      : describePayloadShape(mail as Record<string, unknown>) +
+        (fetchNotes.length > 0
+          ? `\n\nThe body is not in the payload, so it was requested from Resend by id.\nWhat each path answered:\n${fetchNotes.map((line) => `  ${line}`).join("\n")}`
+          : "");
   if (bodyShape) {
     console.warn(
       `[inbound-email] no body on this delivery. Fields present: ${Object.keys(mail).join(", ") || "(none)"}`,

@@ -291,6 +291,15 @@ instead of parsed fields, so `parseMime()` walks multipart boundaries far enough
 to find the text/plain or text/html part, decoding base64 and quoted-printable
 on the way.
 
+Resend's inbound webhook does neither: it delivers the envelope only. The
+observed payload carries `from`, `to`, `cc`, `bcc`, `subject`, `message_id`,
+`created_at`, `attachments`, `received_for` and an `email_id`, and no body of
+any kind. So the body is fetched from the API by that id, and only when the
+payload really has nothing, so a provider that does send it costs no extra
+request. The retrieval path is tried rather than hard-coded, and every attempt
+is reported, because a wrong guess would fail the same silent way the missing
+body did.
+
 If a delivery genuinely has no body anywhere, the message files with a
 description of the payload's shape in place of the text, listing the fields that
 did arrive. That is deliberate: the shape is the one thing needed to fix it, and

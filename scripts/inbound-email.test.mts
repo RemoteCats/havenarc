@@ -27,8 +27,19 @@ let messageExists = false;
 let threadInsertFails: string | null = null;
 
 const realFetch = globalThis.fetch;
+let resendReply: { status: number; body: unknown } | null = null;
+let resendCalls: string[] = [];
+
 globalThis.fetch = (async (input: any, init?: any) => {
   const url = typeof input === "string" ? input : input.url;
+  if (url.startsWith("https://api.resend.com")) {
+    resendCalls.push(url.replace("https://api.resend.com", ""));
+    const reply = resendReply ?? { status: 404, body: { message: "not found" } };
+    return new Response(JSON.stringify(reply.body), {
+      status: reply.status,
+      headers: { "content-type": "application/json" },
+    });
+  }
   if (!url.includes("stub.supabase.co")) return realFetch(input, init);
   const method = init?.method ?? "GET";
   const path = url.replace(/^https:\/\/stub\.supabase\.co/, "");
@@ -217,6 +228,59 @@ console.log("\n3b. Our own notification mail, looping back in\n");
   calls = [];
   const real = await post(mod, delivery());
   ok("a genuine sender is unaffected", (await real.json()).ok === true && calls.some((c) => c.method === "POST"));
+}
+
+console.log("\n3c. The real inbound payload: envelope only, body behind email_id\n");
+{
+  const mod = await loadHandler({ RESEND_API_KEY: "re_test_key" });
+
+  // Exactly the fields the live deployment reported receiving.
+  const envelopeOnly = JSON.stringify({
+    type: "email.received",
+    data: {
+      attachments: [],
+      bcc: [],
+      cc: [],
+      created_at: "2026-09-22T00:22:45.555Z",
+      email_id: "eeabb2a7-1602-47da-bf27-4835375a8d96",
+      from: "mfckr.eth@gmail.com",
+      message_id: "<CALcXggntvCxvKsuPF4XsdyJcG9XyU6oZj9ecR9Scz4=S7XiUXQ@mail.gmail.com>",
+      received_for: ["frontdesk@meastroarchitecture.com"],
+      subject: "Re: 1",
+      to: ["frontdesk@meastroarchitecture.com"],
+    },
+  });
+
+  // a. the body comes back from the API
+  calls = []; resendCalls = []; threadExists = false; messageExists = false;
+  resendReply = { status: 200, body: { text: "the words that were missing", html: "<p>the words that were missing</p>" } };
+  const res = await post(mod, envelopeOnly);
+  ok("returns 200", res.status === 200, String(res.status));
+  ok("asked Resend for the message by id", resendCalls.some((c) => c.includes("eeabb2a7")), JSON.stringify(resendCalls));
+  const filed = calls.find((c) => c.method === "POST" && c.path.includes("email_messages"))?.body as any;
+  ok("files the fetched body", filed?.body_text === "the words that were missing", JSON.stringify(filed?.body_text));
+  ok("uses the payload's own Message-Id, not Resend's internal id",
+     filed?.message_id === "<CALcXggntvCxvKsuPF4XsdyJcG9XyU6oZj9ecR9Scz4=S7XiUXQ@mail.gmail.com>",
+     JSON.stringify(filed?.message_id));
+  ok("strips Re: for threading", (calls.find((c) => c.method === "POST" && c.path.includes("email_threads"))?.body as any)?.subject === "1");
+
+  // b. every path 404s, so it must say what it tried
+  calls = []; resendCalls = []; threadExists = false; messageExists = false;
+  resendReply = { status: 404, body: { message: "not found" } };
+  const res2 = await post(mod, envelopeOnly);
+  ok("still files the message", res2.status === 200);
+  ok("tries more than one path", resendCalls.length > 1, JSON.stringify(resendCalls));
+  const filed2 = calls.find((c) => c.method === "POST" && c.path.includes("email_messages"))?.body as any;
+  ok("records what every path answered", /404/.test(filed2?.body_text ?? ""), JSON.stringify(filed2?.body_text));
+  ok("still lists the payload fields", /email_id/.test(filed2?.body_text ?? ""));
+  console.log("\n" + String(filed2?.body_text).split("\n").map((l: string) => "          " + l).join("\n"));
+
+  // c. a payload that does carry a body must not cost a request
+  calls = []; resendCalls = []; threadExists = false; messageExists = false;
+  resendReply = { status: 200, body: { text: "should not be used" } };
+  await post(mod, delivery());
+  ok("no fetch when the body is already in the payload", resendCalls.length === 0, JSON.stringify(resendCalls));
+  resendReply = null;
 }
 
 console.log("\n4. A rejected signature explains itself in Resend's log\n");

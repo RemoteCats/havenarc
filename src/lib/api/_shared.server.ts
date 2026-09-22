@@ -463,6 +463,80 @@ export function pickBody(data: Record<string, unknown>): { text: string; html: s
 }
 
 /**
+ * Retrieve an inbound message's content from Resend, given its id.
+ *
+ * Resend's inbound webhook delivers the envelope only: sender, recipients,
+ * subject, message id, and an `email_id`. The words are not in the payload at
+ * all, so they have to be fetched.
+ *
+ * The exact path is tried rather than assumed. Resend's inbound retrieval
+ * endpoint could not be confirmed from where this was written, and a wrong
+ * guess hard-coded here would fail the same silent way the missing body did.
+ * So each candidate is tried in turn and the outcome of every one is reported,
+ * which means the first delivery after deploying either works or says exactly
+ * what each path answered.
+ */
+const INBOUND_PATHS = [
+  (id: string) => `/emails/${id}`,
+  (id: string) => `/inbound-emails/${id}`,
+  (id: string) => `/inbound/emails/${id}`,
+  (id: string) => `/emails/inbound/${id}`,
+];
+
+export type FetchedBody = {
+  text: string;
+  html: string;
+  /** One line per path tried, for the log and for the filed message. */
+  attempts: string[];
+};
+
+export async function fetchInboundBody(emailId: string): Promise<FetchedBody> {
+  const attempts: string[] = [];
+  if (!emailId) return { text: "", html: "", attempts: ["no email_id on the delivery"] };
+  if (!RESEND_API_KEY) {
+    return {
+      text: "",
+      html: "",
+      attempts: ["RESEND_API_KEY is unset, so the body cannot be fetched"],
+    };
+  }
+
+  for (const path of INBOUND_PATHS) {
+    const url = `https://api.resend.com${path(emailId)}`;
+    try {
+      const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${RESEND_API_KEY}`, accept: "application/json" },
+      });
+
+      if (!response.ok) {
+        attempts.push(`${path(emailId)} -> ${response.status}`);
+        continue;
+      }
+
+      const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+      if (!payload) {
+        attempts.push(`${path(emailId)} -> 200 but the response was not JSON`);
+        continue;
+      }
+
+      // The shape is unknown too, so reuse the same tolerant extraction.
+      const body = pickBody((payload["data"] as Record<string, unknown>) ?? payload);
+      if (body.text || body.html) {
+        attempts.push(`${path(emailId)} -> 200, body found`);
+        return { ...body, attempts };
+      }
+      attempts.push(
+        `${path(emailId)} -> 200 but no body in it; fields: ${Object.keys(payload).join(", ")}`,
+      );
+    } catch (error) {
+      attempts.push(`${path(emailId)} -> could not be reached: ${String(error)}`);
+    }
+  }
+
+  return { text: "", html: "", attempts };
+}
+
+/**
  * A readable account of a delivery whose body could not be found anywhere.
  *
  * Better in the dashboard than an empty message: the shape of the payload is
