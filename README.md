@@ -75,8 +75,34 @@ It is worth re-running whenever something stops working for no obvious reason.
 A missing policy is invisible from the outside: the tables are all there, the
 server reads them happily with the service role, and the only symptom is a
 visitor being refused with `new row violates row-level security policy`, which
-reads like a bug in the widget. `/api/health` now reports the same thing under
-`schema`, so the deployment answers the question without a SQL editor.
+reads like a bug in the widget. A missing *grant* is worse, because it produces
+`permission denied for table chat_messages`, which looks the same to a visitor
+and to anyone reading the widget, and a check that only looked at policies said
+everything was fine. Both are reported under `schema`.
+
+### When the chat refuses to send
+
+Three different faults make the widget say the same thing, and the service role
+cannot see any of them, because it bypasses RLS. So ask the deployment to be a
+visitor:
+
+```
+/api/health?probe=chat
+```
+
+It signs in anonymously with the browser's own key, opens a conversation, sends
+a message, reads it back, and deletes what it wrote. Each step is reported, and
+a failing one is named for what it actually is:
+
+| What comes back | What to do |
+| --- | --- |
+| `sign in anonymously` fails | Anonymous sign-ins are off. Authentication → Sign In / Providers. |
+| a step reports `missing GRANT` | Re-run `0001_init.sql`. |
+| a step reports `missing POLICY` | Re-run `0001_init.sql`; `schema` names which one. |
+| a step reports an auth problem | The visitor's token was rejected; not a schema fault. |
+
+It writes two rows and deletes them again, so it is opt-in rather than part of
+the ordinary health check.
 
 ### 3. Put yourself on the admin list
 

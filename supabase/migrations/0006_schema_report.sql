@@ -77,6 +77,34 @@ declare
   -- expected: table.column, for columns added by a later migration
   core_columns text[] := array['site_settings.offices'];
 
+  -- expected: role.privilege.table
+  --
+  -- A policy decides which rows a role may touch; a grant decides whether it may
+  -- touch the table at all, and the two fail almost identically. Without the
+  -- insert grant a visitor's message is refused with "permission denied for
+  -- table chat_messages", which reads like the RLS refusal and was invisible
+  -- here, because this function used to check policies and not grants.
+  core_grants text[] := array[
+    'authenticated.INSERT.chat_sessions',
+    'authenticated.SELECT.chat_sessions',
+    'authenticated.UPDATE.chat_sessions',
+    'authenticated.INSERT.chat_messages',
+    'authenticated.SELECT.chat_messages',
+    'authenticated.SELECT.enquiries',
+    'authenticated.UPDATE.enquiries',
+    'authenticated.SELECT.bookings',
+    'authenticated.UPDATE.bookings',
+    'authenticated.SELECT.admins',
+    'anon.SELECT.site_settings',
+    'authenticated.SELECT.site_settings',
+    'authenticated.UPDATE.site_settings'
+  ];
+  email_grants text[] := array[
+    'authenticated.SELECT.email_threads',
+    'authenticated.UPDATE.email_threads',
+    'authenticated.SELECT.email_messages'
+  ];
+
   core_functions text[] := array['is_admin', 'touch_updated_at', 'touch_chat_session'];
   core_types text[] := array['item_status', 'booking_status'];
 
@@ -94,6 +122,20 @@ declare
       where n.nspname = 'public' and c.relname = name and c.relrowsecurity
     ) then
       problems := problems || format('row level security is OFF on public.%s', name);
+    end if;
+  end loop;
+
+  -- Grants ---------------------------------------------------------------
+  foreach name in array (core_grants || case when has_email then email_grants else '{}'::text[] end) loop
+    parts := string_to_array(name, '.');
+    if to_regclass('public.' || quote_ident(parts[3])) is not null and not exists (
+      select 1 from information_schema.role_table_grants
+      where table_schema = 'public'
+        and table_name = parts[3]
+        and grantee = parts[1]
+        and privilege_type = parts[2]
+    ) then
+      problems := problems || format('missing grant: %s on public.%s to %s', parts[2], parts[3], parts[1]);
     end if;
   end loop;
 

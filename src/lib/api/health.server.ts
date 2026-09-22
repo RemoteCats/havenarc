@@ -35,6 +35,28 @@ type ChatReport = {
   realtime?: string;
 };
 
+const HOUR_MS = 60 * 60 * 1000;
+
+/** What the message count and its age together actually say. */
+export function describeChatRecency(count: number, latestAt: string | null): string {
+  if (count === 0) {
+    return "No chat messages have ever been stored. If a visitor has sent one, the write is being refused: /api/health?probe=chat performs that exact write and names the reason.";
+  }
+
+  const age = latestAt ? Date.now() - new Date(latestAt).getTime() : Number.NaN;
+  if (!Number.isFinite(age)) {
+    return `${count} messages are stored. /api/health?probe=chat performs the visitor's write and reports whether it still succeeds.`;
+  }
+
+  const hours = Math.floor(age / HOUR_MS);
+  if (hours < 24) {
+    return `${count} messages stored, the most recent ${hours < 1 ? "within the hour" : `${hours} hour(s) ago`}. The write path was working that recently.`;
+  }
+
+  const days = Math.floor(hours / 24);
+  return `${count} messages stored, but the most recent is ${days} day(s) old. A total above zero is history, not proof that sending works now; if visitors are being refused, /api/health?probe=chat performs that exact write and names the reason.`;
+}
+
 async function inspectChat(): Promise<ChatReport> {
   if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
     return { reachable: false, detail: "Supabase is not configured on this server." };
@@ -59,15 +81,18 @@ async function inspectChat(): Promise<ChatReport> {
       .limit(1)
       .maybeSingle();
 
+    const latestAt = (latest.data?.["created_at"] as string | undefined) ?? null;
+
     return {
       reachable: true,
-      detail:
-        (messages.count ?? 0) > 0
-          ? "Visitor messages are reaching the database. If the dashboard is not showing them, the problem is on the read side — the widget and dashboard now poll as well as subscribe, so reload both."
-          : "No chat messages stored yet. If a visitor has sent one, the write is failing — check that anonymous sign-ins are enabled on this project.",
+      // A count is a record of the past, not a statement about now. Reporting
+      // "messages are reaching the database" off a total above zero read as
+      // reassurance while every message sent that day was being refused, so
+      // say when the last one actually arrived and let the reader judge.
+      detail: describeChatRecency(messages.count ?? 0, latestAt),
       sessions: sessions.count ?? 0,
       messages: messages.count ?? 0,
-      latestMessageAt: (latest.data?.["created_at"] as string | undefined) ?? null,
+      latestMessageAt: latestAt,
       realtime:
         "Realtime is a bonus, not a requirement: both surfaces poll as a fallback, so messages arrive within a few seconds either way.",
     };
@@ -304,6 +329,138 @@ function mailSummary(): string {
   return `BROKEN: ${problems.join("; ")}`;
 }
 
+type ProbeStep = { step: string; ok: boolean; detail: string };
+
+/**
+ * Perform the exact write a visitor's chat makes, under the browser's own key.
+ *
+ * Every other check here runs with the service role, which bypasses RLS and so
+ * cannot see any of the reasons a visitor's message gets refused. Three
+ * separate causes produce the same sentence in the widget, and telling them
+ * apart has meant reading a browser console: a missing policy, a missing grant,
+ * and anonymous sign-ins being switched off. This signs in the way the widget
+ * does and writes the way the widget does, so the answer comes back named.
+ *
+ * Not run unless asked for, because it writes two rows. They are deleted again
+ * with the service role, and the conversation is labelled so an interrupted run
+ * is recognisable in the dashboard.
+ */
+async function probeChatWrite(): Promise<{ ok: boolean; detail: string; steps: ProbeStep[] }> {
+  const steps: ProbeStep[] = [];
+  const add = (step: string, ok: boolean, detail: string) => {
+    steps.push({ step, ok, detail });
+    return ok;
+  };
+
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    return {
+      ok: false,
+      detail: "Supabase is not configured, so the visitor path could not be tried.",
+      steps,
+    };
+  }
+
+  const { createClient } = await import("@supabase/supabase-js");
+  const visitor = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  let sessionId: string | null = null;
+  try {
+    const signIn = await visitor.auth.signInAnonymously();
+    if (signIn.error || !signIn.data.user) {
+      add(
+        "sign in anonymously",
+        false,
+        `${signIn.error?.message ?? "no user returned"}. Anonymous sign-ins are switched off for this project: turn them on under Authentication → Sign In / Providers.`,
+      );
+      return { ok: false, detail: "A visitor cannot sign in, so nothing else was tried.", steps };
+    }
+    add("sign in anonymously", true, `signed in as ${signIn.data.user.id}`);
+
+    const session = await visitor
+      .from("chat_sessions")
+      .insert({ visitor_name: "Health check probe" })
+      .select("id")
+      .single();
+
+    if (session.error) {
+      add("open a conversation", false, explainRefusal(session.error, "chat_sessions", "insert"));
+      return { ok: false, detail: "A visitor cannot open a conversation.", steps };
+    }
+    sessionId = String(session.data["id"]);
+    add("open a conversation", true, "the row was accepted");
+
+    const message = await visitor
+      .from("chat_messages")
+      .insert({ session_id: sessionId, sender: "visitor", body: "Health check probe." })
+      .select("id")
+      .single();
+
+    if (message.error) {
+      add("send a message", false, explainRefusal(message.error, "chat_messages", "insert"));
+      return {
+        ok: false,
+        detail: "A visitor can open a conversation but cannot send a message.",
+        steps,
+      };
+    }
+    add("send a message", true, "the message was accepted");
+
+    const readBack = await visitor.from("chat_messages").select("id").eq("session_id", sessionId);
+    add(
+      "read the conversation back",
+      !readBack.error && (readBack.data?.length ?? 0) > 0,
+      readBack.error
+        ? explainRefusal(readBack.error, "chat_messages", "select")
+        : `${readBack.data?.length ?? 0} message(s) visible to the visitor`,
+    );
+
+    return {
+      ok: steps.every((entry) => entry.ok),
+      detail: "A visitor can hold a conversation.",
+      steps,
+    };
+  } catch (error) {
+    add("unexpected", false, String(error));
+    return { ok: false, detail: "The probe itself failed.", steps };
+  } finally {
+    // Tidy up with the service role, which is not subject to the policies
+    // being tested. Cascade takes the messages with the session.
+    if (sessionId && SERVICE_ROLE_KEY) {
+      try {
+        const { adminClient } = await import("./_shared.server");
+        await adminClient().from("chat_sessions").delete().eq("id", sessionId);
+      } catch {
+        steps.push({
+          step: "clean up",
+          ok: false,
+          detail: `The probe's conversation ${sessionId} could not be deleted; remove it from the dashboard.`,
+        });
+      }
+    }
+  }
+}
+
+/** Turn a refusal into the thing that actually needs fixing. */
+export function explainRefusal(
+  error: { message: string; code?: string; hint?: string },
+  table: string,
+  action: string,
+): string {
+  const code = error.code ?? "";
+  if (/permission denied/i.test(error.message)) {
+    return `${error.message} — this is a missing GRANT, not a policy. 0001_init.sql grants ${action} on ${table} to authenticated.`;
+  }
+  if (code === "42501" || /row-level security/i.test(error.message)) {
+    return `${error.message} — this is a missing POLICY. The schema section above names it; 0001_init.sql restores it.`;
+  }
+  if (/jwt|token/i.test(error.message)) {
+    return `${error.message} — the visitor's session was rejected, which is an auth problem rather than a schema one.`;
+  }
+  return `${error.message}${error.hint ? ` (hint: ${error.hint})` : ""}${code ? ` [${code}]` : ""}`;
+}
+
 export async function handleHealthCheck(request: Request): Promise<Response> {
   if (request.method !== "GET" && request.method !== "HEAD") {
     return json({ error: "Use GET." }, 405);
@@ -349,6 +506,10 @@ export async function handleHealthCheck(request: Request): Promise<Response> {
   // problem, and it cannot be answered from the browser.
   const [chat, schema, email] = await Promise.all([inspectChat(), inspectSchema(), inspectEmail()]);
 
+  // Opt-in, because it writes two rows and deletes them again.
+  const wantsProbe = new URL(request.url).searchParams.get("probe") === "chat";
+  const probe = wantsProbe ? await probeChatWrite() : undefined;
+
   return json(
     {
       status: missing.length === 0 && schema.ok ? "ok" : "misconfigured",
@@ -358,6 +519,12 @@ export async function handleHealthCheck(request: Request): Promise<Response> {
       schema,
       chat,
       email,
+      ...(probe
+        ? { probe }
+        : {
+            probeHint:
+              "Add ?probe=chat to run the exact write a visitor makes, under the browser's key, and have the failing step named. It writes two rows and deletes them again.",
+          }),
       supabaseProject: SUPABASE_URL ?? null,
       mailDomain: MAIL_DOMAIN,
       missing: missing.map((entry) => ({ name: entry.name, setAnyOf: entry.accepts ?? [] })),
