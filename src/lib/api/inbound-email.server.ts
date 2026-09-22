@@ -2,6 +2,8 @@
 // Server-only: it reads the signing secret and writes with the service role.
 
 import {
+  MAIL_DOMAIN,
+  MAIL_FROM,
   RESEND_WEBHOOK_SECRET,
   adminClient,
   describeWebhookSecret,
@@ -9,6 +11,8 @@ import {
   isEmail,
   json,
   normaliseSubject,
+  bareAddress,
+  describePayloadShape,
   parseAddress,
   pickBody,
   text,
@@ -45,6 +49,15 @@ function headerValue(headers: unknown, name: string): string | null {
 function firstRecipient(to: unknown): string {
   if (Array.isArray(to)) return parseAddress(to[0]).email;
   return parseAddress(to).email;
+}
+
+/** True for mail this deployment sent, looping back in through the webhook. */
+function isOwnNotification(sender: string): boolean {
+  const address = sender.trim().toLowerCase();
+  if (!address) return false;
+  if (address === bareAddress(MAIL_FROM).toLowerCase()) return true;
+  // The default from-address, in case MAIL_FROM was changed after mail went out.
+  return address === `no-reply@${MAIL_DOMAIN}`.toLowerCase();
 }
 
 export async function handleInboundEmail(request: Request): Promise<Response> {
@@ -125,14 +138,31 @@ export async function handleInboundEmail(request: Request): Promise<Response> {
   const messageId =
     headerValue(headers, "message-id") ?? (providerId ? `resend:${providerId}` : null);
   const inReplyTo = headerValue(headers, "in-reply-to");
-  const body = pickBody(mail as Record<string, unknown>);
-  if (!body.text && !body.html) {
-    // Filing a message with no body is worse than useless: the dashboard shows
-    // an empty conversation and there is nothing to say where the words went.
-    // The key names are the provider's to choose, so print the ones that
-    // arrived rather than guessing again.
+  // Our own notification mail, arriving back through the inbound route. That
+  // happens when the notify address is on the sending domain and forwards here,
+  // and filing it turns the inbox into an echo of itself.
+  if (isOwnNotification(from.email)) {
     console.warn(
-      `[inbound-email] no body on this delivery. The keys present were: ${Object.keys(mail).join(", ") || "(none)"}. If one of those holds the message, pickBody() in _shared.server.ts needs it.`,
+      `[inbound-email] dropped our own notification mail from ${from.email}, which came back in through this route. MAIL_NOTIFY_TO is on MAIL_DOMAIN and forwards here; point it at a mailbox outside the domain.`,
+    );
+    return json({
+      ignored: true,
+      reason: "This is our own outbound notification arriving back through the inbound route.",
+      fix: "MAIL_NOTIFY_TO is an address on MAIL_DOMAIN that forwards into /api/inbound-email. Point it at a mailbox outside the domain.",
+    });
+  }
+
+  const body = pickBody(mail as Record<string, unknown>);
+  // Filing a message with no body is worse than useless: the dashboard shows an
+  // empty conversation and there is nothing to say where the words went. The
+  // key names are the provider's to choose, so rather than guess a third time,
+  // put the shape of what arrived where the message would have been. Whoever
+  // sees the blank message can then read why without server log access.
+  const bodyShape =
+    body.text || body.html ? "" : describePayloadShape(mail as Record<string, unknown>);
+  if (bodyShape) {
+    console.warn(
+      `[inbound-email] no body on this delivery. Fields present: ${Object.keys(mail).join(", ") || "(none)"}`,
     );
   }
 
@@ -202,7 +232,7 @@ export async function handleInboundEmail(request: Request): Promise<Response> {
       from_name: from.name,
       to_email: firstRecipient(mail.to) || null,
       subject: rawSubject || subject,
-      body_text: text(body.text, 100000) || null,
+      body_text: text(body.text, 100000) || bodyShape || null,
       body_html: body.html ? body.html.slice(0, 200000) : null,
       message_id: messageId,
       in_reply_to: inReplyTo,

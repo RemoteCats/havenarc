@@ -190,6 +190,35 @@ console.log("\n3. Deliveries that are dropped, and why\n");
   threadInsertFails = null;
 }
 
+console.log("\n3b. Our own notification mail, looping back in\n");
+{
+  const mod = await loadHandler({ MAIL_DOMAIN: "meastroarchitecture.com" });
+  calls = [];
+  const loop = JSON.stringify({
+    type: "email.received",
+    data: {
+      email_id: "re_loop",
+      from: "Meastro Architecture <no-reply@meastroarchitecture.com>",
+      to: ["frontdesk@meastroarchitecture.com"],
+      subject: "New chat message from holly",
+      text: "A visitor has started a chat.",
+      headers: [{ name: "Message-Id", value: "<loop@x>" }],
+    },
+  });
+  const res = await post(mod, loop);
+  const out = await res.json();
+  ok("is not filed as an inbound thread", !calls.some((c) => c.method === "POST"),
+     JSON.stringify(calls.map((c) => c.method + " " + c.path)));
+  ok("is acknowledged so Resend stops retrying", res.status === 200);
+  ok("names the setting that causes it", /MAIL_NOTIFY_TO/.test(out.fix ?? ""), JSON.stringify(out));
+  console.log(`          ${out.fix}`);
+
+  // A real person writing in must still get through.
+  calls = [];
+  const real = await post(mod, delivery());
+  ok("a genuine sender is unaffected", (await real.json()).ok === true && calls.some((c) => c.method === "POST"));
+}
+
 console.log("\n4. A rejected signature explains itself in Resend's log\n");
 {
   const mod = await loadHandler({});

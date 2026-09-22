@@ -213,6 +213,11 @@ by a local stand-in.
 > **Do not point a forwarding address on `MAIL_DOMAIN` back at your own inbound
 > route.** Mail loops through the webhook until the sending quota is gone.
 
+The route refuses to file mail it recognises as this deployment's own
+notification, so a loop shows up as a warning in the log rather than as the
+inbox filling with copies of itself. That is a guard, not a fix: point
+`MAIL_NOTIFY_TO` at a mailbox outside `MAIL_DOMAIN`.
+
 ### When mail does not reach the dashboard
 
 Mail that never appears has four possible stopping points, and the dashboard
@@ -281,10 +286,18 @@ delivery that is arriving and signed correctly will be filed.
 Plenty of mail is HTML-only, so a message can file correctly and still read as
 empty. `pickBody()` looks for the text under any of the names a provider might
 use, nested or not, and falls back to a plain-text rendering of the HTML; the
-dashboard does the same for rows already stored. If a delivery genuinely has no
-body anywhere, the route logs the keys that *were* present, which is the only
-way to find out where a provider actually put it. `scripts/email-body.test.mts`
-covers both halves.
+dashboard does the same for rows already stored. Some providers hand over the whole RFC 822 message
+instead of parsed fields, so `parseMime()` walks multipart boundaries far enough
+to find the text/plain or text/html part, decoding base64 and quoted-printable
+on the way.
+
+If a delivery genuinely has no body anywhere, the message files with a
+description of the payload's shape in place of the text, listing the fields that
+did arrive. That is deliberate: the shape is the one thing needed to fix it, and
+putting it where the message would have been means whoever notices the blank
+message can read why without server log access.
+
+`scripts/email-body.test.mts` and `scripts/mime.test.mts` cover all of it.
 
 ## Local development
 

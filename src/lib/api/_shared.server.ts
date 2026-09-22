@@ -6,6 +6,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 import { htmlToText } from "../html-to-text.ts";
+import { parseMime, type MimeBody } from "../mime.ts";
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 export { htmlToText };
@@ -441,10 +442,57 @@ export function pickBody(data: Record<string, unknown>): { text: string; html: s
   const plain = from(["text", "plain", "body_text", "text_body", "textBody", "plain_body"]);
   const bodyString = typeof data["body"] === "string" ? data["body"] : "";
 
+  // Some providers hand over the whole RFC 822 message instead of parsed
+  // fields, sometimes base64-encoded. Only worth parsing if nothing simpler
+  // turned anything up.
+  let mime: MimeBody = { text: "", html: "" };
+  if (!plain && !html) {
+    for (const key of ["raw", "raw_email", "rawEmail", "mime", "message", "email", "content"]) {
+      const candidate = data[key];
+      if (typeof candidate !== "string" || candidate.trim() === "") continue;
+      mime = parseMime(candidate);
+      if (mime.text || mime.html) break;
+    }
+  }
+
+  const finalHtml = html || mime.html;
   return {
-    text: plain || htmlToText(html) || bodyString,
-    html,
+    text: plain || mime.text || htmlToText(finalHtml) || bodyString,
+    html: finalHtml,
   };
+}
+
+/**
+ * A readable account of a delivery whose body could not be found anywhere.
+ *
+ * Better in the dashboard than an empty message: the shape of the payload is
+ * the one thing needed to fix it, and it is otherwise only in a server log that
+ * whoever notices the blank message may not be able to read.
+ */
+export function describePayloadShape(data: Record<string, unknown>, limit = 1800): string {
+  const shape = Object.entries(data)
+    .map(([key, value]) => {
+      if (value === null || value === undefined) return `${key}: null`;
+      if (Array.isArray(value)) return `${key}: array(${value.length})`;
+      if (typeof value === "object") return `${key}: object{${Object.keys(value).join(", ")}}`;
+      if (typeof value === "string") {
+        const preview = value.length > 80 ? `${value.slice(0, 80)}…` : value;
+        return `${key}: "${preview}" (${value.length} chars)`;
+      }
+      return `${key}: ${String(value)}`;
+    })
+    .join("\n");
+
+  return [
+    "(no body was found on this delivery)",
+    "",
+    "The message filed, but none of the fields it arrived with held the text.",
+    "These are the fields that did arrive, so the right one can be wired up:",
+    "",
+    shape || "(the payload carried no fields at all)",
+  ]
+    .join("\n")
+    .slice(0, limit);
 }
 
 export function normaliseSubject(value: unknown): string {
